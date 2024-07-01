@@ -1,0 +1,17 @@
+[package]
+name = "wsbridge"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix-web="4.8.0" 
+actix-web-actors="4.3.0"
+actix = "0.13.5"
+tokio-util = { version = "0.7", features = ["codec"] }
+uuid = { version = "1.9.1", features = ["v4", "serde"] }
+tokio = { version = "1.38.0", features = ["full"] }
+futures = "0.3"
+tokio-stream = "0.1.15" 
+actix-rt = "2.10.0"
