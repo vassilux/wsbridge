@@ -2,12 +2,14 @@ use crate::connection_manager::ConnectionManager;
 use crate::messages::{Connect, Disconnect, WsMessage};
 use actix::prelude::*;
 use actix_web_actors::ws;
+use bytes::{Bytes, BytesMut};
 use futures::sink::SinkExt;
+use futures::stream::StreamExt; // Assurez-vous d'importer StreamExt
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{split, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
+use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 use uuid::Uuid;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -16,7 +18,7 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct WsConn {
     hb: Instant,
     id: Uuid,
-    writer: Option<Arc<Mutex<FramedWrite<WriteHalf<TcpStream>, LinesCodec>>>>,
+    writer: Option<Arc<Mutex<FramedWrite<WriteHalf<TcpStream>, BytesCodec>>>>,
     connection_manager: Addr<ConnectionManager>,
 }
 
@@ -47,6 +49,7 @@ impl Actor for WsConn {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
+        println!("WsConn started");
         self.hb(ctx);
 
         let addr = ctx.address();
@@ -63,10 +66,11 @@ impl Actor for WsConn {
                     let (reader, writer) = split(stream);
                     act.writer = Some(Arc::new(Mutex::new(FramedWrite::new(
                         writer,
-                        LinesCodec::new(),
+                        BytesCodec::new(),
                     ))));
-                    let framed_reader = FramedRead::new(reader, LinesCodec::new());
-                    TcpStreamHandler::start(framed_reader, ctx.address());
+                    let framed_reader = FramedRead::new(reader, BytesCodec::new());
+                    TcpStreamHandler::create_and_start(framed_reader, ctx.address());
+                    println!("Connected to TCP server");
                 }
                 Err(err) => {
                     println!("Failed to connect to TCP server: {}", err);
@@ -77,6 +81,7 @@ impl Actor for WsConn {
     }
 
     fn stopping(&mut self, _: &mut Self::Context) -> Running {
+        println!("WsConn stopping");
         self.connection_manager.do_send(Disconnect { id: self.id });
         Running::Stop
     }
@@ -93,22 +98,33 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConn {
                 self.hb = Instant::now();
             }
             Ok(ws::Message::Binary(bin)) => {
+                println!("Received binary message: {:?}", bin); //
                 if let Some(writer) = &self.writer {
                     let writer = Arc::clone(writer);
                     actix::spawn(async move {
-                        let mut writer_guard: std::sync::MutexGuard<
-                            FramedWrite<WriteHalf<TcpStream>, LinesCodec>,
-                        > = writer.lock().unwrap();
-                        let _ = writer_guard.send(bin.into()).await;
+                        let mut writer_guard = writer.lock().unwrap();
+                        let bytes = Bytes::from(bin);
+                        if let Err(e) = writer_guard.send(bytes).await {
+                            println!("Error sending binary message: {:?}", e); // Log ajoutée
+                        } else {
+                            println!("Binary message routed"); // Log ajoutée
+                        }
                     });
                 }
             }
             Ok(ws::Message::Text(text)) => {
+                println!("Received text message: {}", text);
                 if let Some(writer) = &self.writer {
                     let writer = Arc::clone(writer);
                     actix::spawn(async move {
-                        let mut writer = writer.lock().unwrap();
-                        let _ = writer.send(text.into()).await;
+                        let mut writer_guard = writer.lock().unwrap();
+                        let text_with_newline = format!("{}\n", text);
+                        let bytes = Bytes::from(text_with_newline.into_bytes());
+                        if let Err(e) = writer_guard.send(bytes).await {
+                            println!("Error sending text message: {:?}", e); // Log ajoutée
+                        } else {
+                            println!("Text message routed"); // Log ajoutée
+                        }
                     });
                 }
             }
@@ -130,31 +146,55 @@ impl Handler<WsMessage> for WsConn {
 }
 
 pub struct TcpStreamHandler {
-    framed: FramedRead<ReadHalf<TcpStream>, LinesCodec>,
+    framed: Option<FramedRead<ReadHalf<TcpStream>, BytesCodec>>,
     ws_conn: Addr<WsConn>,
 }
 
 impl TcpStreamHandler {
-    pub fn start(
-        framed: FramedRead<ReadHalf<TcpStream>, LinesCodec>,
+    pub fn create_and_start(
+        framed: FramedRead<ReadHalf<TcpStream>, BytesCodec>,
         ws_conn: Addr<WsConn>,
     ) -> Addr<Self> {
-        Self::create(|ctx| {
-            ctx.add_stream(framed);
-            Self { framed, ws_conn }
-        })
+        let handler = Self {
+            framed: Some(framed),
+            ws_conn,
+        };
+        handler.start()
     }
 }
 
 impl Actor for TcpStreamHandler {
     type Context = Context<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        println!("TcpStreamHandler started"); // Log ajoutée
+        if let Some(framed) = self.framed.take() {
+            ctx.add_stream(framed);
+        }
+    }
 }
 
-impl StreamHandler<Result<String, LinesCodecError>> for TcpStreamHandler {
-    fn handle(&mut self, msg: Result<String, LinesCodecError>, ctx: &mut Self::Context) {
+pub struct AddStreamMessage(pub FramedRead<ReadHalf<TcpStream>, BytesCodec>);
+
+impl Message for AddStreamMessage {
+    type Result = ();
+}
+
+impl Handler<AddStreamMessage> for TcpStreamHandler {
+    type Result = ();
+
+    fn handle(&mut self, msg: AddStreamMessage, ctx: &mut Self::Context) {
+        ctx.add_stream(msg.0);
+    }
+}
+
+impl StreamHandler<Result<BytesMut, std::io::Error>> for TcpStreamHandler {
+    fn handle(&mut self, msg: Result<BytesMut, std::io::Error>, ctx: &mut Self::Context) {
         match msg {
             Ok(data) => {
-                self.ws_conn.do_send(WsMessage(data));
+                let text = String::from_utf8_lossy(&data).to_string();
+                println!("Received text from TCP stream: {}", text); // Log ajoutée
+                self.ws_conn.do_send(WsMessage(text));
             }
             Err(e) => {
                 eprintln!("Failed to read from TCP stream: {:?}", e);

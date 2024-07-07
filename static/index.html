@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+  <title>WS Bridge Test</title>
+  <link href="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+
+  <style>
+    #log {
+      height: 20em;
+      overflow-y: auto;
+      margin: 0.5em 0;
+      padding: 12px;
+      border: 1px solid #ced4da;
+      border-radius: 0.25rem;
+      background-color: black;
+      color: white;
+      font-family: monospace;
+    }
+    .msg {
+      margin: 0;
+      padding: 0.25em 0.5em;
+    }
+    .msg--bad {
+      color: lightcoral;
+    }
+    .msg--success {
+      color: lightgreen;
+    }
+  </style>
+</head>
+<body>
+  <div class="container mt-5">
+    <div class="row mb-3">
+      <div class="col">
+        <h1 id="title">WS Bridge Test</h1>
+      </div>
+    </div>
+    <div class="row mb-3">
+      <div class="col">
+        <div id="log" class="bg-dark text-light"></div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="col-10">
+        <input type="text" id="inputMessage" class="form-control" placeholder="Type a message" />
+      </div>
+      <div class="col-2">
+        <button id="send" class="btn btn-primary w-100">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $sendButton = document.querySelector('#send');
+    const $inputMessage = document.querySelector('#inputMessage');
+    const $log = document.querySelector('#log');
+
+    /** @type {WebSocket | null} */
+    let socket = null;
+
+    function log(msg, type = 'status') {
+      $log.innerHTML += `<p class="msg msg--${type}">${msg}</p>`;
+      $log.scrollTop = $log.scrollHeight;
+    }
+
+    function startWebSocket() {
+      const { location } = window;
+      const proto = location.protocol.startsWith('https') ? 'wss' : 'ws';
+      const wsUri = `${proto}://${location.host}/ws`;
+
+      socket = new WebSocket(wsUri);
+
+      socket.onopen = () => {
+        log('Connected to the server.', 'success');
+      };
+
+      socket.onmessage = (ev) => {
+        log(`Server: ${ev.data}`, 'message');
+      };
+
+      socket.onclose = () => {
+        log('Disconnected from the server.', 'bad');
+        socket = null;
+      };
+
+      socket.onerror = (error) => {
+        log(`WebSocket error: ${error}`, 'bad');
+      };
+    }
+
+    $sendButton.addEventListener('click', () => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        const message = $inputMessage.value;
+        socket.send(message);
+        log(`You: ${message}`, 'message');
+        $inputMessage.value = '';
+      } else {
+        log('WebSocket is not connected.', 'bad');
+      }
+    });
+
+    startWebSocket();
+  </script>
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.16.0/umd/popper.min.js"></script>
+  <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+</body>
+</html>
